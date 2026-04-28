@@ -1,6 +1,8 @@
+
 import streamlit as st
 import pandas as pd
 import fdb
+import plotly.express as px  # Para gráficos interactivos
 from datetime import date
 
 @st.cache_data
@@ -53,8 +55,8 @@ def obtener_datos_produccion():
             conn.close()
 
 # --- INTERFAZ ---
-st.set_page_config(page_title="UGRPG - Plan de Entrega", layout="wide")
-st.title("📦 Detalle de Pedidos por Fecha de Entrega")
+st.set_page_config(page_title="UGRPG - Dashboard Producción", layout="wide")
+st.title("📊 Resumen Visual de Carga - UGRPG")
 
 resultado = obtener_datos_produccion()
 
@@ -62,23 +64,61 @@ if isinstance(resultado, str):
     st.error(resultado)
 else:
     if not resultado.empty:
-        # Formateo de fecha para la tabla
+        # 1. LIMPIEZA DE DATOS
         resultado['FECHA_VIGENCIA_ENTREGA'] = pd.to_datetime(resultado['FECHA_VIGENCIA_ENTREGA']).dt.date
         
-        st.write("### Desglose de Carga para el día 02 de Mayo")
+        # 2. SECCIÓN DE MÉTRICAS (KPIs)
+        st.subheader("📌 Indicadores Clave")
+        c1, c2, c3 = st.columns(3)
         
-        st.dataframe(
-            resultado, 
-            use_container_width=True, 
-            hide_index=True,
-            column_config={
-                "FECHA_VIGENCIA_ENTREGA": st.column_config.DateColumn("Día Entrega"),
-                "FOLIO": st.column_config.TextColumn("Folio Pedido"),
-                "TOTAL_SACOS": st.column_config.NumberColumn("Sacos", format="%d"),
-            }
-        )
+        total_sacos = resultado['TOTAL_SACOS'].sum()
+        productos_unicos = resultado['PRODUCTO'].nunique()
+        dia_pico = resultado.groupby('FECHA_VIGENCIA_ENTREGA')['TOTAL_SACOS'].sum().idxmax()
         
-        # Métrica resumen
-        st.metric("Total Sacos Programados", f"{resultado['TOTAL_SACOS'].sum():,.0f}")
+        c1.metric("Total Sacos a Producir", f"{total_sacos:,.0f}")
+        c2.metric("Variedad de Productos", productos_unicos)
+        c3.metric("Día de Mayor Carga", dia_pico.strftime('%d/%m'))
+
+        st.divider()
+
+        # 3. VISUALIZACIONES
+        col_izq, col_der = st.columns([1, 1])
+
+        with col_izq:
+            st.write("### 🔥 Top 10 Productos con más Demanda")
+            # Agrupamos para el gráfico de barras
+            df_prod = resultado.groupby('PRODUCTO')['TOTAL_SACOS'].sum().reset_index().sort_values('TOTAL_SACOS', ascending=False).head(10)
+            
+            fig_bar = px.bar(
+                df_prod, 
+                x='TOTAL_SACOS', 
+                y='PRODUCTO', 
+                orientation='h',
+                color='TOTAL_SACOS',
+                color_continuous_scale='Blues',
+                text_auto='.2s'
+            )
+            fig_bar.update_layout(yaxis={'categoryorder':'total ascending'}, showlegend=False)
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+        with col_der:
+            st.write("### 📅 Carga de Trabajo por Día")
+            df_fecha = resultado.groupby('FECHA_VIGENCIA_ENTREGA')['TOTAL_SACOS'].sum().reset_index()
+            
+            fig_line = px.line(
+                df_fecha, 
+                x='FECHA_VIGENCIA_ENTREGA', 
+                y='TOTAL_SACOS',
+                markers=True,
+                line_shape='spline',
+                text='TOTAL_SACOS'
+            )
+            fig_line.update_traces(textposition="top center")
+            st.plotly_chart(fig_line, use_container_width=True)
+
+        # 4. TABLA DETALLADA AL FINAL
+        with st.expander("🔎 Ver detalle de folios y pedidos"):
+            st.dataframe(resultado, use_container_width=True, hide_index=True)
+
     else:
-        st.warning("No hay pedidos programados para la fecha seleccionada.")
+        st.warning("No hay datos para mostrar.")
