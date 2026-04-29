@@ -1,17 +1,17 @@
-
 import streamlit as st
 import pandas as pd
 import fdb
-import plotly.express as px  # Para gráficos interactivos
-from datetime import date
+import plotly.express as px  
+from datetime import date, timedelta
+
+# --- CONFIGURACIÓN DE LA PÁGINA ---
+st.set_page_config(page_title="UGRPG - Dashboard Producción", layout="wide")
 
 @st.cache_data
-def obtener_datos_produccion():
+def obtener_datos_produccion(f_inicio, f_fin):
     conn = None
     try:
         fdb.load_api(st.secrets["firebird"]["dll_path"])
-
-        # Conexión remota al servidor de producción
         conn = fdb.connect(
             host=st.secrets["firebird"]["host"],
             database=st.secrets["firebird"]["database"],
@@ -22,7 +22,7 @@ def obtener_datos_produccion():
         
         cur = conn.cursor()
 
-        # Corregido: Se agrega D1.FOLIO al GROUP BY para evitar error de ejecución
+        # Usamos parámetros (?) para que el rango sea dinámico
         query = """
             SELECT 
                 D1.FECHA_VIGENCIA_ENTREGA,
@@ -36,12 +36,12 @@ def obtener_datos_produccion():
             INNER JOIN LIBRES_PED_VE L1 ON (L1.DOCTO_VE_ID = D1.DOCTO_VE_ID)
             WHERE (DET1.ROL <> 'C')
               AND (L1.PROGRAMADO = 'P')
-              AND (D1.FECHA_VIGENCIA_ENTREGA = '2026-05-02')
+              AND (D1.FECHA_VIGENCIA_ENTREGA BETWEEN ? AND ?)
             GROUP BY D1.FECHA_VIGENCIA_ENTREGA, D1.FOLIO, A1.NOMBRE, A1.UNIDAD_VENTA
-            ORDER BY D1.FECHA_VIGENCIA_ENTREGA ASC, D1.FOLIO ASC, TOTAL_SACOS DESC
+            ORDER BY D1.FECHA_VIGENCIA_ENTREGA ASC, TOTAL_SACOS DESC
         """
 
-        cur.execute(query)
+        cur.execute(query, (f_inicio, f_fin))
         data = cur.fetchall()
         
         cols = [desc[0] for desc in cur.description]
@@ -54,71 +54,72 @@ def obtener_datos_produccion():
         if conn:
             conn.close()
 
-# --- INTERFAZ ---
-st.set_page_config(page_title="UGRPG - Dashboard Producción", layout="wide")
-st.title("📊 Resumen Visual de Carga - UGRPG")
+# --- INTERFAZ DE FILTROS ---
+st.title("📊 Control de Carga y Producción - UGRPG")
 
-resultado = obtener_datos_produccion()
+with st.sidebar:
+    st.header("Configuración de Reporte")
+    # Selector de rango de fechas
+    today = date.today()
+    rango_fechas = st.date_input(
+        "Selecciona el rango de entregas",
+        value=(today, today + timedelta(days=3)),
+        min_value=today - timedelta(days=30),
+        max_value=today + timedelta(days=90)
+    )
 
-if isinstance(resultado, str):
-    st.error(resultado)
-else:
-    if not resultado.empty:
-        # 1. LIMPIEZA DE DATOS
+# Verificamos que se hayan seleccionado ambas fechas (inicio y fin)
+if len(rango_fechas) == 2:
+    f_inicio, f_fin = rango_fechas
+    resultado = obtener_datos_produccion(f_inicio, f_fin)
+
+    if isinstance(resultado, str):
+        st.error(resultado)
+    elif not resultado.empty:
+        # Limpieza de fechas para visualización
         resultado['FECHA_VIGENCIA_ENTREGA'] = pd.to_datetime(resultado['FECHA_VIGENCIA_ENTREGA']).dt.date
         
-        # 2. SECCIÓN DE MÉTRICAS (KPIs)
-        st.subheader("📌 Indicadores Clave")
-        c1, c2, c3 = st.columns(3)
+        # --- SECCIÓN DE MÉTRICAS ---
+        total_general = resultado['TOTAL_SACOS'].sum()
+        st.metric("Volumen Total en Rango Seleccionado", f"{total_general:,.0f} Sacos")
+
+        # --- GRÁFICO CONSOLIDADO ---
+        # Agrupamos por producto para el gráfico general
+        df_prod = resultado.groupby('PRODUCTO')['TOTAL_SACOS'].sum().reset_index().sort_values('TOTAL_SACOS', ascending=False)
         
-        total_sacos = resultado['TOTAL_SACOS'].sum()
-        productos_unicos = resultado['PRODUCTO'].nunique()
-        dia_pico = resultado.groupby('FECHA_VIGENCIA_ENTREGA')['TOTAL_SACOS'].sum().idxmax()
+        fig_agrupado = px.bar(
+            df_prod.head(15), 
+            x='TOTAL_SACOS',
+            y='PRODUCTO',
+            orientation='h',
+            color='TOTAL_SACOS',
+            color_continuous_scale='Viridis',
+            text_auto='.2s',
+            title=f"Acumulado del {f_inicio} al {f_fin}"
+        )
+
+        fig_agrupado.update_layout(
+            font=dict(size=18),
+            yaxis={'categoryorder':'total ascending'},
+            height=600
+        )
+        fig_agrupado.update_traces(textfont_size=20, textposition="outside", cliponaxis=False)
         
-        c1.metric("Total Sacos a Producir", f"{total_sacos:,.0f}")
-        c2.metric("Variedad de Productos", productos_unicos)
-        c3.metric("Día de Mayor Carga", dia_pico.strftime('%d/%m'))
+        st.plotly_chart(fig_agrupado, use_container_width=True)
 
-        st.divider()
-
-        # 3. VISUALIZACIONES
-        col_izq, col_der = st.columns([1, 1])
-
-        with col_izq:
-            st.write("### 🔥 Top 10 Productos con más Demanda")
-            # Agrupamos para el gráfico de barras
-            df_prod = resultado.groupby('PRODUCTO')['TOTAL_SACOS'].sum().reset_index().sort_values('TOTAL_SACOS', ascending=False).head(10)
-            
-            fig_bar = px.bar(
-                df_prod, 
-                x='TOTAL_SACOS', 
-                y='PRODUCTO', 
-                orientation='h',
-                color='TOTAL_SACOS',
-                color_continuous_scale='Blues',
-                text_auto='.2s'
+        # --- DESGLOSE DETALLADO ---
+        with st.expander("📄 Ver detalle por Folio y Fecha"):
+            st.write("Esta tabla muestra la fecha específica asignada a cada pedido:")
+            st.dataframe(
+                resultado,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "FECHA_VIGENCIA_ENTREGA": st.column_config.DateColumn("Entrega Programada"),
+                    "TOTAL_SACOS": st.column_config.NumberColumn("Sacos", format="%d")
+                }
             )
-            fig_bar.update_layout(yaxis={'categoryorder':'total ascending'}, showlegend=False)
-            st.plotly_chart(fig_bar, use_container_width=True)
-
-        with col_der:
-            st.write("### 📅 Carga de Trabajo por Día")
-            df_fecha = resultado.groupby('FECHA_VIGENCIA_ENTREGA')['TOTAL_SACOS'].sum().reset_index()
-            
-            fig_line = px.line(
-                df_fecha, 
-                x='FECHA_VIGENCIA_ENTREGA', 
-                y='TOTAL_SACOS',
-                markers=True,
-                line_shape='spline',
-                text='TOTAL_SACOS'
-            )
-            fig_line.update_traces(textposition="top center")
-            st.plotly_chart(fig_line, use_container_width=True)
-
-        # 4. TABLA DETALLADA AL FINAL
-        with st.expander("🔎 Ver detalle de folios y pedidos"):
-            st.dataframe(resultado, use_container_width=True, hide_index=True)
-
     else:
-        st.warning("No hay datos para mostrar.")
+        st.warning(f"No hay pedidos programados entre el {f_inicio} y el {f_fin}.")
+else:
+    st.info("Por favor, selecciona la fecha de inicio y fin en el calendario de la izquierda.")
