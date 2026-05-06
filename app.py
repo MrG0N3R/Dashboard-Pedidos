@@ -2,13 +2,69 @@ import streamlit as st
 import pandas as pd
 import fdb
 import plotly.express as px  
+import re
 from datetime import date, timedelta
+from fpdf import FPDF
+import io
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="UGRPG - Dashboard Producción", layout="wide")
 
+
+
+def generar_pdf_resumen(df_resumen, f_inicio, f_fin):
+    pdf = FPDF()
+    pdf.add_page()
+    
+    # Encabezado
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(0, 10, "Reporte de Toneladas a Producir - UGRPG", ln=True, align='C')
+    
+    pdf.set_font("Arial", '', 12)
+    pdf.cell(0, 10, f"Periodo: {f_inicio} al {f_fin}", ln=True, align='C')
+    pdf.ln(10)
+    
+    # Tabla de totales
+    pdf.set_font("Arial", 'B', 12)
+    pdf.set_fill_color(200, 220, 255)
+    pdf.cell(120, 10, "Producto", border=1, fill=True)
+    pdf.cell(60, 10, "Total Toneladas", border=1, fill=True, align='C')
+    pdf.ln()
+    
+    pdf.set_font("Arial", '', 11)
+    total_general_ton = 0
+    
+    for _, fila in df_resumen.iterrows():
+        pdf.cell(120, 8, str(fila['PRODUCTO']), border=1)
+        pdf.cell(60, 8, f"{fila['TOTAL_TONELADAS']:,.2f}", border=1, align='C')
+        pdf.ln()
+        total_general_ton += fila['TOTAL_TONELADAS']
+    
+    # Total Final
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(120, 10, "TOTAL GENERAL", border=1)
+    pdf.cell(60, 10, f"{total_general_ton:,.2f} Ton", border=1, align='C')
+    
+    # Retornar el PDF como bytes
+    return pdf.output(dest='S').encode('latin-1')
+
+
+
+
+def extraer_kilos(nombre_producto):
+    """
+    Busca números seguidos de 'kg' o 'k' en el nombre del producto.
+    Si no encuentra nada, asume 1 (para no afectar la multiplicación o manejarlo como error).
+    """
+    match = re.search(r'(\d+)\s*(?:kg|k)', nombre_producto, re.IGNORECASE)
+    if match:
+        return float(match.group(1))
+    return 0.0  # O un valor por defecto si el producto no es por saco
+
 @st.cache_data
 def obtener_datos_produccion(f_inicio, f_fin):
+    # ... (Tu función de conexión original se mantiene igual)
+    #
     conn = None
     try:
         fdb.load_api(st.secrets["firebird"]["dll_path"])
@@ -19,10 +75,7 @@ def obtener_datos_produccion(f_inicio, f_fin):
             password=st.secrets["firebird"]["password"],
             charset=st.secrets["firebird"]["charset"]
         )
-        
         cur = conn.cursor()
-
-        # Usamos parámetros (?) para que el rango sea dinámico
         query = """
             SELECT 
                 D1.FECHA_VIGENCIA_ENTREGA,
@@ -40,26 +93,20 @@ def obtener_datos_produccion(f_inicio, f_fin):
             GROUP BY D1.FECHA_VIGENCIA_ENTREGA, D1.FOLIO, A1.NOMBRE, A1.UNIDAD_VENTA
             ORDER BY D1.FECHA_VIGENCIA_ENTREGA ASC, TOTAL_SACOS DESC
         """
-
         cur.execute(query, (f_inicio, f_fin))
         data = cur.fetchall()
-        
         cols = [desc[0] for desc in cur.description]
-        df = pd.DataFrame(data, columns=cols)
-        return df
-
+        return pd.DataFrame(data, columns=cols)
     except Exception as e:
         return f"Error: {str(e)}"
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
-# --- INTERFAZ DE FILTROS ---
+# --- INTERFAZ Y LÓGICA ---
 st.title("📊 Control de Carga y Producción - UGRPG")
 
 with st.sidebar:
     st.header("Configuración de Reporte")
-    # Selector de rango de fechas
     today = date.today()
     rango_fechas = st.date_input(
         "Selecciona el rango de entregas",
@@ -68,7 +115,6 @@ with st.sidebar:
         max_value=today + timedelta(days=90)
     )
 
-# Verificamos que se hayan seleccionado ambas fechas (inicio y fin)
 if len(rango_fechas) == 2:
     f_inicio, f_fin = rango_fechas
     resultado = obtener_datos_produccion(f_inicio, f_fin)
@@ -76,50 +122,63 @@ if len(rango_fechas) == 2:
     if isinstance(resultado, str):
         st.error(resultado)
     elif not resultado.empty:
-        # Limpieza de fechas para visualización
         resultado['FECHA_VIGENCIA_ENTREGA'] = pd.to_datetime(resultado['FECHA_VIGENCIA_ENTREGA']).dt.date
         
-        # --- SECCIÓN DE MÉTRICAS ---
-        total_general = resultado['TOTAL_SACOS'].sum()
-        st.metric("Volumen Total en Rango Seleccionado", f"{total_general:,.0f} Sacos")
+            # --- NUEVA LÓGICA DE CÁLCULO ---
+        # Convertimos los sacos (Decimal) a float para que sean compatibles
+        resultado['TOTAL_SACOS'] = resultado['TOTAL_SACOS'].astype(float)
 
-        # --- GRÁFICO CONSOLIDADO ---
-        # Agrupamos por producto para el gráfico general
-        df_prod = resultado.groupby('PRODUCTO')['TOTAL_SACOS'].sum().reset_index().sort_values('TOTAL_SACOS', ascending=False)
+        # 1. Extraer los kilos del nombre
+        resultado['KG_POR_SACO'] = resultado['PRODUCTO'].apply(extraer_kilos)
+
+        # 2. Ahora la multiplicación funcionará sin errores
+        resultado['TOTAL_TONELADAS'] = (resultado['TOTAL_SACOS'] * resultado['KG_POR_SACO']) / 1000
+        
+        # --- SECCIÓN DE MÉTRICAS ---
+        col1, col2 = st.columns(2)
+        total_sacos = resultado['TOTAL_SACOS'].sum()
+        total_ton = resultado['TOTAL_TONELADAS'].sum()
+        
+        col1.metric("Volumen Total (Sacos)", f"{total_sacos:,.0f}")
+        col2.metric("Toneladas Necesarias", f"{total_ton:,.2f} Ton")
+
+        # --- GRÁFICO EN TONELADAS ---
+        df_prod = resultado.groupby('PRODUCTO')['TOTAL_TONELADAS'].sum().reset_index().sort_values('TOTAL_TONELADAS', ascending=False)
         
         fig_agrupado = px.bar(
             df_prod.head(15), 
-            x='TOTAL_SACOS',
+            x='TOTAL_TONELADAS',
             y='PRODUCTO',
             orientation='h',
-            color='TOTAL_SACOS',
-            color_continuous_scale='Viridis',
-            text_auto='.2s',
-            title=f"Acumulado del {f_inicio} al {f_fin}"
+            color='TOTAL_TONELADAS',
+            color_continuous_scale='Cividis', # Cambiado para diferenciar
+            text_auto='.2f',
+            title=f"Toneladas Acumuladas del {f_inicio} al {f_fin}",
+            labels={'TOTAL_TONELADAS': 'Toneladas'}
         )
-
-        fig_agrupado.update_layout(
-            font=dict(size=18),
-            yaxis={'categoryorder':'total ascending'},
-            height=600
-        )
-        fig_agrupado.update_traces(textfont_size=20, textposition="outside", cliponaxis=False)
-        
         st.plotly_chart(fig_agrupado, use_container_width=True)
 
-        # --- DESGLOSE DETALLADO ---
-        with st.expander("📄 Ver detalle por Folio y Fecha"):
-            st.write("Esta tabla muestra la fecha específica asignada a cada pedido:")
-            st.dataframe(
-                resultado,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "FECHA_VIGENCIA_ENTREGA": st.column_config.DateColumn("Entrega Programada"),
-                    "TOTAL_SACOS": st.column_config.NumberColumn("Sacos", format="%d")
-                }
-            )
-    else:
-        st.warning(f"No hay pedidos programados entre el {f_inicio} y el {f_fin}.")
-else:
-    st.info("Por favor, selecciona la fecha de inicio y fin en el calendario de la izquierda.")
+        if not resultado.empty:
+            # Preparamos el resumen agrupado para el PDF
+            df_resumen_pdf = resultado.groupby('PRODUCTO')['TOTAL_TONELADAS'].sum().reset_index()
+            df_resumen_pdf = df_resumen_pdf.sort_values('TOTAL_TONELADAS', ascending=False)
+
+            with st.expander("📄 Ver detalle por Folio y Fecha"):
+                # Botón para descargar PDF
+                pdf_bytes = generar_pdf_resumen(df_resumen_pdf, f_inicio, f_fin)
+                
+                st.download_button(
+                    label="📥 Descargar Reporte de Toneladas (PDF)",
+                    data=pdf_bytes,
+                    file_name=f"Reporte_Produccion_{f_inicio}.pdf",
+                    mime="application/pdf"
+                )
+                
+                st.write("Esta tabla muestra la fecha específica asignada a cada pedido:")
+                st.dataframe(
+                    resultado,
+                    use_container_width=True,
+                    hide_index=True
+                    # ... tus configuraciones de columna anteriores ...
+                )
+            
