@@ -142,20 +142,35 @@ if len(rango_fechas) == 2:
         col1.metric("Volumen Total (Sacos)", f"{total_sacos:,.0f}")
         col2.metric("Toneladas Necesarias", f"{total_ton:,.2f} Ton")
 
-        # --- GRÁFICO EN TONELADAS ---
+       # --- GRÁFICO EN TONELADAS ---
         df_prod = resultado.groupby('PRODUCTO')['TOTAL_TONELADAS'].sum().reset_index().sort_values('TOTAL_TONELADAS', ascending=False)
-        
+
         fig_agrupado = px.bar(
             df_prod.head(15), 
             x='TOTAL_TONELADAS',
             y='PRODUCTO',
             orientation='h',
             color='TOTAL_TONELADAS',
-            color_continuous_scale='Cividis', # Cambiado para diferenciar
-            text_auto='.2f',
+            color_continuous_scale='Cividis',
+            text_auto='.2f', # Muestra el número con 2 decimales
             title=f"Toneladas Acumuladas del {f_inicio} al {f_fin}",
             labels={'TOTAL_TONELADAS': 'Toneladas'}
         )
+
+        # Ajustes de tamaño de fuente
+        fig_agrupado.update_layout(
+            font=dict(size=18), # Tamaño de los nombres de productos y ejes
+            yaxis={'categoryorder':'total ascending'},
+            height=600
+        )
+
+        # ESTA ES LA LÍNEA CLAVE: Aumenta el tamaño de los números sobre las barras
+        fig_agrupado.update_traces(
+            textfont_size=24,   # Ajusta este número según qué tan grande los quieras
+            textposition="outside", 
+            cliponaxis=False
+        )
+
         st.plotly_chart(fig_agrupado, use_container_width=True)
 
         if not resultado.empty:
