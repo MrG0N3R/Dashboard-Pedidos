@@ -35,7 +35,11 @@ def generar_pdf_resumen(df_resumen, f_inicio, f_fin):
     total_general_ton = 0
     
     for _, fila in df_resumen.iterrows():
-        pdf.cell(120, 8, str(fila['PRODUCTO']), border=1)
+        # --- LIMPIEZA CLAVE PARA EVITAR UNICODEENCODEERROR ---
+        # Convierte a string, fuerza a latin-1 ignorando o reemplazando lo roto
+        nombre_limpio = str(fila['PRODUCTO']).encode('latin-1', 'replace').decode('latin-1')
+        
+        pdf.cell(120, 8, nombre_limpio, border=1)
         pdf.cell(60, 8, f"{fila['TOTAL_TONELADAS']:,.2f}", border=1, align='C')
         pdf.ln()
         total_general_ton += fila['TOTAL_TONELADAS']
@@ -45,8 +49,8 @@ def generar_pdf_resumen(df_resumen, f_inicio, f_fin):
     pdf.cell(120, 10, "TOTAL GENERAL", border=1)
     pdf.cell(60, 10, f"{total_general_ton:,.2f} Ton", border=1, align='C')
     
-    # Retornar el PDF como bytes
-    return pdf.output(dest='S').encode('latin-1')
+    # Cambiamos aquí a 'utf-8' o dejamos que FPDF maneje su salida estándar limpia
+    return pdf.output(dest='S').encode('latin-1', 'replace')
 
 
 
