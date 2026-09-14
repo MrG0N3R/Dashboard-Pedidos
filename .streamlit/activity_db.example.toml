@@ -1,0 +1,7 @@
+dbname = "UserActivity"
+user = "postgres"
+password = "REEMPLAZAR_EN_EL_ARCHIVO_LOCAL"
+host = "127.0.0.1"
+port = "5432"
+client_encoding = "utf8"
+connect_timeout = 5

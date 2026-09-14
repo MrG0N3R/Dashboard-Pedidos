@@ -6,10 +6,17 @@ import re
 from datetime import date, timedelta
 from fpdf import FPDF
 import io
+from tracker import track_user_activity
+from auth import require_login
 
-# --- CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(page_title="UGRPG - Dashboard Producción", layout="wide")
+st.set_page_config(page_title="Pedidos Anticipados · UGRPG", page_icon="📊")
 
+# El tablero y las consultas solo se ejecutan después de iniciar sesión.
+current_user = require_login()
+track_user_activity(
+    app_name="Sistema de Monitoreo de Pedidos Anticipados",
+    username_override=current_user.username,
+)
 
 
 def generar_pdf_resumen(df_resumen, f_inicio, f_fin):
@@ -200,4 +207,3 @@ if len(rango_fechas) == 2:
                     hide_index=True
                     # ... tus configuraciones de columna anteriores ...
                 )
-            
